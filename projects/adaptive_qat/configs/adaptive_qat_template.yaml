@@ -282,6 +282,10 @@ trainer:
         ema_decay: 0.95
         pact: true
         qdrop_p: 0.15
+      checkpoint_modules:
+        - "image_encoder.trunk"
+        - "sam_mask_decoder.transformer"
+      checkpoint_use_reentrant: false
     feature_layers: null
   loss:
     all:

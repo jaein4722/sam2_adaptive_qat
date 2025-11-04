@@ -94,7 +94,6 @@ class AdaptiveTrainer(Trainer):
         self.logger = instantiate_logger(
             self.logging_conf, wandb_conf=self._wandb_conf, rank=self.distributed_rank
         )
-
         self.model = instantiate(self.model_conf, _convert_="all")
         print_model_summary(self.model)
 
@@ -134,67 +133,6 @@ class AdaptiveTrainer(Trainer):
         for module in self.loss.values():
             if hasattr(module, "set_progress"):
                 module.set_progress(progress)
-
-    def _log_bit_diagnostics(self, step: int) -> None:
-        if self.distributed_rank != 0 or self.loss is None:
-            return
-        model_module = unwrap_ddp_if_wrapped(self.model)
-        bit_controller = getattr(model_module, "bit_controller", None)
-        if bit_controller is None:
-            return
-        diag_source = None
-        for module in self.loss.values():
-            if hasattr(module, "get_latest_metrics"):
-                diag_source = module
-                break
-        if diag_source is None:
-            return
-        metrics = diag_source.get_latest_metrics()
-        with torch.no_grad():
-            bits = {k: v.detach().clone() for k, v in bit_controller.bits().items()}
-        importance_map = getattr(model_module, "importance_map", {})
-        param_counts = getattr(model_module, "param_counts", {})
-
-        rows = []
-        log_payload: Dict[str, float] = {}
-        for name in bit_controller.module_names:
-            bit_tensor = bits[name]
-            bit_value = float(bit_tensor.detach().mean().item())
-            importance_value = float(importance_map.get(name, 1.0))
-            params_value = float(param_counts.get(name, 0.0))
-            grad = bit_controller.parameter(name).grad
-            grad_norm = float(grad.norm().item()) if grad is not None else 0.0
-            rows.append((name, bit_value, importance_value, params_value, grad_norm))
-            prefix = f"layer/{name}"
-            log_payload[f"{prefix}/bit"] = bit_value
-            log_payload[f"{prefix}/importance"] = importance_value
-            log_payload[f"{prefix}/params"] = params_value
-            log_payload[f"{prefix}/grad_norm"] = grad_norm
-
-        scalar_payload = {}
-        for key in ("avg_bits_w", "mu", "bit_penalty", "budget_penalty", "target_bits"):
-            value = metrics.get(key)
-            if value is None:
-                continue
-            if isinstance(value, torch.Tensor):
-                scalar_payload[key] = float(value.detach().cpu().item())
-            else:
-                scalar_payload[key] = float(value)
-        for key, value in scalar_payload.items():
-            log_payload[f"scalar/{key}"] = value
-
-        if rows:
-            header = "Layer                          | Bits | Importance | Params(M) | ||grad||"
-            lines = [header]
-            for name, bit_value, importance_value, params_value, grad_norm in rows:
-                lines.append(
-                    f"{name:<30} | {bit_value:5.2f} | {importance_value:10.4f} | {params_value / 1e6:8.3f} | {grad_norm:9.3e}"
-                )
-            logging.info("Bit allocation diagnostics @ step %d\n%s", step, "\n".join(lines))
-
-        if log_payload:
-            namespaced = {f"Adaptive/{k}": v for k, v in log_payload.items()}
-            self.logger.log_dict(namespaced, step)
 
     # ------------------------------------------------------------------
     def train_epoch(self, train_loader):
@@ -244,9 +182,6 @@ class AdaptiveTrainer(Trainer):
 
                 self.scaler.unscale_(self.optim.optimizer)
                 grads_unscaled = True
-
-                if data_iter % self.logging_conf.log_scalar_frequency == 0:
-                    self._log_bit_diagnostics(self.steps[phase])
 
                 self.where = progress_ratio
                 assert self.where <= 1 + self.EPSILON

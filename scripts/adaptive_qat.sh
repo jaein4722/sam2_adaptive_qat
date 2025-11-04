@@ -1,6 +1,6 @@
-exp_dir=sam2_logs/adaptive_qat_toy_202511104_133100
+exp_dir=sam2_logs/adaptive_qat_toy_202511104_163300
 
-CUDA_VISIBLE_DEVICES=3,5 python -m projects.adaptive_qat.train_adaptive_qat \
+CUDA_VISIBLE_DEVICES=3 python -m projects.adaptive_qat.train_adaptive_qat \
     --config projects/adaptive_qat/configs/toy.yaml \
     --experiment-dir $exp_dir
 

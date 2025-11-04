@@ -462,7 +462,8 @@ class Trainer:
         loss = self.loss[key](outputs, targets)
         loss_str = f"Losses/{phase}_{key}_loss"
 
-        loss_log_str = os.path.join("Step_Losses", loss_str)
+        dataset_log_key = key.replace("/", "_")
+        loss_log_str = f"Losses/{phase}/{dataset_log_key}/core"
 
         # loss contains multiple sub-components we wish to log
         step_losses = {}
@@ -471,7 +472,11 @@ class Trainer:
                 {f"Losses/{phase}_{key}_{k}": v for k, v in loss.items()}
             )
             loss = self._log_loss_detailed_and_return_core_loss(
-                loss, loss_log_str, self.steps[phase]
+                loss,
+                loss_log_str,
+                self.steps[phase],
+                phase=phase,
+                dataset=dataset_log_key,
             )
 
         if self.steps[phase] % self.logging_conf.log_scalar_frequency == 0:
@@ -1030,13 +1035,67 @@ class Trainer:
             self.optim_conf.param_group_modifiers,
         )
 
-    def _log_loss_detailed_and_return_core_loss(self, loss, loss_str, step):
+    def _log_loss_detailed_and_return_core_loss(
+        self,
+        loss,
+        loss_str,
+        step,
+        *,
+        phase=None,
+        dataset=None,
+    ):
         core_loss = loss.pop(CORE_LOSS_KEY)
         if step % self.logging_conf.log_scalar_frequency == 0:
-            for k in loss:
-                log_str = os.path.join(loss_str, k)
-                self.logger.log(log_str, loss[k], step)
+            for name, value in loss.items():
+                metric_name = self._format_step_metric_name(
+                    loss_str, name, phase=phase, dataset=dataset
+                )
+                self.logger.log(metric_name, value, step)
         return core_loss
+
+    def _format_step_metric_name(self, base_prefix, name, *, phase=None, dataset=None):
+        if phase is None:
+            return os.path.join(base_prefix, name)
+
+        if dataset is not None:
+            dataset = dataset.replace("/", "_")
+        context = phase if dataset is None else f"{phase}/{dataset}"
+
+        if name.startswith("adaptive_bits/"):
+            suffix = name.split("/", 1)[1]
+            return f"Quantization/Bits/{context}/{suffix}"
+
+        if name.startswith("adaptive_param_count/"):
+            suffix = name.split("/", 1)[1]
+            return f"Quantization/ParamCount/{context}/{suffix}"
+
+        if name.startswith("adaptive_"):
+            remainder = name[len("adaptive_") :]
+            group, metric = self._resolve_adaptive_metric_target(remainder)
+            metric = metric.replace("//", "/")
+            return f"{group}/{context}/{metric}"
+
+        return f"Losses/{context}/{name}"
+
+    def _resolve_adaptive_metric_target(self, remainder: str):
+        mapping = {
+            "layer_kd": ("Adaptive/Loss", "layer_kd"),
+            "bit_penalty": ("Adaptive/Loss", "bit_penalty"),
+            "layer_total": ("Adaptive/Loss", "layer_total"),
+            "kd_output": ("Adaptive/Loss", "kd_output"),
+            "avg_bits_w": ("Quantization", "avg_bits_w"),
+            "bit_mean": ("Quantization", "bit_mean"),
+            "budget_penalty": ("Quantization", "budget_penalty"),
+            "mu": ("Quantization", "mu"),
+            "layer_kd_scaled": ("Adaptive/LossScaled", "layer_kd"),
+            "bit_penalty_scaled": ("Adaptive/LossScaled", "bit_penalty"),
+            "kd_output_scaled": ("Adaptive/LossScaled", "kd_output"),
+            "base_scaled": ("Adaptive/LossScaled", "base"),
+        }
+        if remainder in mapping:
+            return mapping[remainder]
+        sanitized = remainder.replace("/", "_")
+        return "Adaptive/Misc", sanitized
 
 
 def print_model_summary(model: torch.nn.Module, log_dir: str = ""):

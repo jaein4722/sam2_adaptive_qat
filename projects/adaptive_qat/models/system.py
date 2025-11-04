@@ -23,6 +23,35 @@ from training.utils.checkpoint_utils import (
     load_checkpoint_and_apply_kernels,
     load_state_dict_into_model,
 )
+try:
+    import torch.utils.checkpoint as torch_checkpoint
+except ImportError:  # pragma: no cover - defensive guard
+    torch_checkpoint = None
+
+
+def checkpoint_wrapper(module: nn.Module, *, use_reentrant: bool = False) -> nn.Module:  # type: ignore
+    if torch_checkpoint is None or not hasattr(torch_checkpoint, "checkpoint"):
+        return module
+
+    class _CheckpointModule(nn.Module):
+        def __init__(self, wrapped: nn.Module) -> None:
+            super().__init__()
+            self.wrapped = wrapped
+
+        def forward(self, *inputs, **kwargs):
+            def _forward(*inner_inputs):
+                return self.wrapped(*inner_inputs, **kwargs)
+
+            try:
+                return torch_checkpoint.checkpoint(
+                    _forward,
+                    *inputs,
+                    use_reentrant=use_reentrant,
+                )
+            except TypeError:
+                return torch_checkpoint.checkpoint(_forward, *inputs)
+
+    return _CheckpointModule(module)
 
 
 @dataclass
@@ -39,6 +68,28 @@ class AdaptiveQATQuantConfig:
     smoothing_end_ratio: float = 0.0
     smoothing_importance_scale: bool = False
     act: Optional[Mapping[str, object]] = None
+    checkpoint_modules: Optional[Iterable[str]] = None
+    checkpoint_use_reentrant: bool = False
+
+
+def _wrap_checkpoint_modules(
+    root: nn.Module, module_names: Iterable[str], *, use_reentrant: bool
+) -> None:
+    for name in module_names:
+        parts = name.split(".")
+        parent = root
+        try:
+            for part in parts[:-1]:
+                parent = getattr(parent, part)
+            leaf_name = parts[-1]
+            target = getattr(parent, leaf_name)
+        except AttributeError:
+            logging.warning("Checkpoint wrap skipped; module '%s' not found.", name)
+            continue
+        if isinstance(target, nn.Module):
+            setattr(parent, leaf_name, checkpoint_wrapper(target, use_reentrant=use_reentrant))
+        else:
+            logging.warning("Checkpoint wrap skipped; object at '%s' is not a module.", name)
 
 
 def _filter_module_names(model: nn.Module, names: Iterable[str]) -> Dict[str, nn.Module]:
@@ -165,6 +216,14 @@ class AdaptiveQATModel(nn.Module):
             name: float(sum(param.numel() for param in student_modules[name].parameters()))
             for name in layer_names
         }
+
+        checkpoint_modules = list(quantization.checkpoint_modules or [])
+        if checkpoint_modules:
+            _wrap_checkpoint_modules(
+                student_module,
+                checkpoint_modules,
+                use_reentrant=quantization.checkpoint_use_reentrant,
+            )
 
         self.teacher = teacher_module
         self.student = student_module
