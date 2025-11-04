@@ -1,0 +1,11 @@
+CUDA_VISIBLE_DEVICES=2,4 python projects/sav_finetune/train_sav.py \
+    --train-frames /home/lji/SAM/datasets/sa-v/sav_train/JPEGImages_24fps \
+    --train-annotations /home/lji/SAM/datasets/sa-v/sav_train/Annotations_manual_JSON \
+    --val-frames /home/lji/SAM/datasets/sa-v/sav_val/JPEGImages_24fps \
+    --val-annotations /home/lji/SAM/datasets/sa-v/sav_val/Annotations_6fps\
+    --val-file-list /home/lji/SAM/datasets/sa-v/sav_val/sav_val.txt \
+    --checkpoint /home/lji/SAM/sam2/checkpoints/sam2.1_hiera_base_plus.pt \
+    --experiment-dir /home/lji/SAM/sam2/projects/sav_finetune/exps \
+    --gpus 2 \
+    --grad-log-every 100 \
+    --seed 42

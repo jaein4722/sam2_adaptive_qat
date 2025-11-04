@@ -6,7 +6,7 @@
 
 import random
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 from training.dataset.vos_segment_loader import LazySegments
 
@@ -79,26 +79,33 @@ class RandomUniformSampler(VOSSampler):
 
 
 class EvalSampler(VOSSampler):
-    """
-    VOS Sampler for evaluation: sampling all the frames and all the objects in a video
-    """
+    """Evaluation sampler with optional frame sub-sampling."""
 
     def __init__(
         self,
+        *,
+        max_frames: Optional[int] = None,
+        frame_stride: int = 1,
     ):
         super().__init__()
+        self.max_frames = max_frames if max_frames is None or max_frames > 0 else None
+        self.frame_stride = max(1, frame_stride)
 
     def sample(self, video, segment_loader, epoch=None):
-        """
-        Sampling all the frames and all the objects
-        """
+        """Sampling frames/objects with optional sub-sampling."""
         if self.sort_frames:
-            # ordered by frame id
             frames = sorted(video.frames, key=lambda x: x.frame_idx)
         else:
-            # use the original order
             frames = video.frames
-        object_ids = segment_loader.load(frames[0].frame_idx).keys()
+
+        if self.frame_stride > 1:
+            frames = frames[:: self.frame_stride]
+        if self.max_frames is not None:
+            frames = frames[: self.max_frames]
+        if len(frames) == 0:
+            raise Exception("No frames selected for evaluation")
+
+        object_ids = list(segment_loader.load(frames[0].frame_idx).keys())
         if len(object_ids) == 0:
             raise Exception("First frame of the video has no objects")
 

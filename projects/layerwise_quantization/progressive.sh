@@ -1,0 +1,21 @@
+CUDA_VISIBLE_DEVICES=2,3 python -m projects.layerwise_quantization.scripts.train_cdpq \
+    --teacher-config configs/sam2.1/sam2.1_hiera_b+.yaml \
+    --teacher-checkpoint checkpoints/sam2.1_hiera_base_plus.pt \
+    --student-config configs/sam2.1/sam2.1_hiera_b+.yaml \
+    --student-checkpoint checkpoints/sam2.1_hiera_base_plus.pt \
+    --train-root ../datasets/sa-v \
+    --val-root ../datasets/sa-v \
+    --train-sample-count 100 \
+    --epochs 5 \
+    --batch-size 2 \
+    --val-batch-size 2 \
+    --learning-rate 1e-4 \
+    --initial-bits 8 \
+    --min-bits 2 \
+    --layer-threshold 0.1 \
+    --variance-threshold 0.05 \
+    --impact-threshold 0.3 \
+    --confidence-method baseline \
+    --feature-limit 8 \
+    --run-name cdpq_run \
+    --tags cdqp

@@ -281,8 +281,12 @@ class ProgressMeter:
 def get_resume_checkpoint(checkpoint_save_dir):
     if not g_pathmgr.isdir(checkpoint_save_dir):
         return None
-    ckpt_file = os.path.join(checkpoint_save_dir, "checkpoint.pt")
-    if not g_pathmgr.isfile(ckpt_file):
-        return None
+    preferred_ckpts = [
+        os.path.join(checkpoint_save_dir, "checkpoint_last.pt"),
+        os.path.join(checkpoint_save_dir, "checkpoint.pt"),
+    ]
+    for ckpt_file in preferred_ckpts:
+        if g_pathmgr.isfile(ckpt_file):
+            return ckpt_file
 
-    return ckpt_file
+    return None

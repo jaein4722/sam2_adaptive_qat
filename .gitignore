@@ -7,5 +7,14 @@ __pycache__/
 build/*
 _C.*
 outputs/*
-checkpoints/*.pt
+checkpoints/*.pt*
 demo/backend/checkpoints/*.pt
+
+sam2_logs/
+exps/
+eval_results/
+wandb/
+AGENTS.md
+GEMINI.md
+*.out
+*.log
