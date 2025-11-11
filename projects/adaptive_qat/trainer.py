@@ -424,6 +424,7 @@ class AdaptiveTrainer(Trainer):
         checkpoint_to_save = dict(checkpoint)
         full_state = checkpoint_to_save.get("model", {})
 
+        base_model = unwrap_ddp_if_wrapped(self.model)
         student_prefix = checkpoint_to_save.get("model_student_prefix", "student.")
         has_prefixed_student = any(
             isinstance(key, str) and key.startswith(student_prefix) for key in full_state
@@ -441,10 +442,13 @@ class AdaptiveTrainer(Trainer):
                 if not key.startswith(student_prefix)
             }
         else:
-            base_model = unwrap_ddp_if_wrapped(self.model)
             student_model = unwrap_ddp_if_wrapped(getattr(base_model, "student", base_model))
             student_state = student_model.state_dict()
             aux_state = full_state
+
+        sanitize_fn = getattr(base_model, "sanitize_student_state_dict", None)
+        if callable(sanitize_fn):
+            student_state = sanitize_fn(student_state)
 
         checkpoint_to_save["model"] = student_state
         checkpoint_to_save["model_aux"] = aux_state

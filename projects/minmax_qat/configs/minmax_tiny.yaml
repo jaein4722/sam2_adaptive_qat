@@ -1,4 +1,4 @@
-# Adaptive QAT training template.
+# Min-max QAT baseline (Hiera tiny) sharing the toy adaptive schedule (1 epoch, 1k SA-1B images, 10 SA-V videos).
 
 paths:
   data_root: /home/lji/SAM/datasets
@@ -14,10 +14,8 @@ paths:
   sa1b_annotations: ${paths.data_root}/sa-1b_split/train
   sa1b_file_list: projects/adaptive_qat/configs/filelists/sa1b_train_1000.txt
   sa1b_excluded_list: null
-  importance_json: projects/adaptive_qat/configs/importance/hiera_base_plus_importance.json
-  experiment_dir: sam2_logs/adaptive_qat_example
-  teacher_checkpoint: checkpoints/sam2.1_hiera_base_plus.pt
-  student_checkpoint: checkpoints/sam2.1_hiera_base_plus.pt
+  experiment_dir: sam2_logs/minmax_qat_tiny
+  model_checkpoint: checkpoints/sam2.1_hiera_tiny.pt
 
 scratch:
   resolution: 1024
@@ -29,7 +27,6 @@ scratch:
   num_epochs: 1
   base_lr: 5.0e-6
   vision_lr: 3.0e-6
-  bit_controller_lr: 7.0e-3
 
 model_base: &sam2_model
   _target_: training.model.sam2.SAM2Train
@@ -38,9 +35,11 @@ model_base: &sam2_model
     scalp: 1
     trunk:
       _target_: sam2.modeling.backbones.hieradet.Hiera
-      embed_dim: 112
-      num_heads: 2
-      drop_path_rate: 0.1
+      embed_dim: 96
+      num_heads: 1
+      stages: [1, 2, 7, 2]
+      global_att_blocks: [5, 7, 9]
+      window_pos_embed_bkg_spatial_size: [7, 7]
     neck:
       _target_: sam2.modeling.backbones.image_encoder.FpnNeck
       position_encoding:
@@ -50,7 +49,7 @@ model_base: &sam2_model
         scale: null
         temperature: 10000
       d_model: 256
-      backbone_channel_list: [896, 448, 224, 112]
+      backbone_channel_list: [768, 384, 192, 96]
       fpn_top_down_levels: [2, 3]
       fpn_interp_model: nearest
   memory_attention:
@@ -147,7 +146,6 @@ model_base: &sam2_model
   use_act_ckpt_iterative_pt_sampling: false
   num_init_cond_frames_for_eval: 1
   forward_backbone_per_frame_for_eval: true
-  freeze_image_encoder: false
 
 vos:
   train_transforms:
@@ -203,11 +201,11 @@ trainer:
   _target_: projects.adaptive_qat.trainer.AdaptiveTrainer
   max_epochs: ${scratch.num_epochs}
   mode: train
-  accelerator: ${oc.env:ADAPTIVE_ACCELERATOR, cuda}
+  accelerator: ${oc.env:MINMAX_ACCELERATOR, cuda}
   seed_value: 123
-  mid_epoch_val_fractions: [0.25, 0.5, 0.75]
+  mid_epoch_val_fractions: []
   distributed:
-    backend: ${oc.env:ADAPTIVE_DIST_BACKEND, nccl}
+    backend: ${oc.env:MINMAX_DIST_BACKEND, nccl}
     find_unused_parameters: true
   cuda:
     allow_tf32: true
@@ -305,100 +303,56 @@ trainer:
       dataset_prob:
         - 1.0
   model:
-    _target_: projects.adaptive_qat.models.system.AdaptiveQATModel
-    teacher: *sam2_model
-    student: *sam2_model
-    teacher_checkpoint: ${paths.teacher_checkpoint}
-    student_checkpoint: ${paths.student_checkpoint}
+    _target_: projects.minmax_qat.models.MinMaxQATModel
+    model: *sam2_model
+    checkpoint_path: ${paths.model_checkpoint}
     quantization:
-      _target_: projects.adaptive_qat.models.system.AdaptiveQATQuantConfig
-      layers: null
-      init_bits: 6.0
-      min_bits: 2.0
-      max_bits: 8.0
-      requires_grad: true
-      importance: null
-      importance_path: ${paths.importance_json}
-      smoothing: 0.3
-      allow_bit_grad: true
-      smoothing_end_ratio: 0.2
-      smoothing_importance_scale: true
-      act:
-        ema_scale: true
-        ema_decay: 0.95
-        pact: true
-        qdrop_p: 0.15
-    feature_layers: null
+      _target_: projects.minmax_qat.quantization.MinMaxQuantConfig
+      weight_bits: 4
+      activation_bits: 4
+      per_channel_weights: true
+      activation_ema_decay: 0.99
+      quantize_inputs: true
+      quantize_outputs: true
+      observer_epsilon: 1.0e-6
+      target_modules: []
+      exclude_modules: []
   loss:
     all:
-      _target_: projects.adaptive_qat.losses.AdaptiveQATLoss
-      base_loss:
-        _target_: training.loss_fns.MultiStepMultiMasksAndIous
-        weight_dict:
-          loss_mask: 20
-          loss_dice: 1
-          loss_iou: 1
-          loss_class: 1
-        supervise_all_iou: true
-        iou_use_l1_loss: true
-        pred_obj_scores: true
-        focal_gamma_obj_score: 0.0
-        focal_alpha_obj_score: -1.0
-      layer_names: null
-      importance_path: ${paths.importance_json}
-      kd_temperature: 1.0
-      base_weight: 1.0
-      layer_kd_weight: 1.0
-      bit_penalty_weight: 3.0
-      output_kd_weight: 1.0
-      alpha: 1.8
-      eps: 1.0e-3
-      budget:
-        enabled: true
-        target_avg_w_bits: 3.0
-        warm_target: 3.3
-        mu_init: 0.0
-        mu_step: 5.0e-3
-        warmup_ratio: 0.2
+      _target_: training.loss_fns.MultiStepMultiMasksAndIous
+      weight_dict:
+        loss_mask: 20
+        loss_dice: 1
+        loss_iou: 1
+        loss_class: 1
+      supervise_all_iou: true
+      iou_use_l1_loss: true
+      pred_obj_scores: true
+      focal_gamma_obj_score: 0.0
+      focal_alpha_obj_score: -1.0
     val:
-      _target_: projects.adaptive_qat.losses.AdaptiveQATLoss
-      base_loss:
-        _target_: training.loss_fns.MultiStepMultiMasksAndIous
-        weight_dict:
-          loss_mask: 20
-          loss_dice: 1
-          loss_iou: 1
-          loss_class: 1
-        supervise_all_iou: true
-        iou_use_l1_loss: true
-        pred_obj_scores: true
-        focal_gamma_obj_score: 0.0
-        focal_alpha_obj_score: -1.0
-      layer_names: null
-      importance_path: ${paths.importance_json}
-      kd_temperature: 1.0
-      base_weight: 1.0
-      layer_kd_weight: 1.0
-      bit_penalty_weight: 3.0
-      output_kd_weight: 1.0
-      alpha: 1.8
-      eps: 1.0e-3
-      budget:
-        enabled: false
+      _target_: training.loss_fns.MultiStepMultiMasksAndIous
+      weight_dict:
+        loss_mask: 20
+        loss_dice: 1
+        loss_iou: 1
+        loss_class: 1
+      supervise_all_iou: true
+      iou_use_l1_loss: true
+      pred_obj_scores: true
+      focal_gamma_obj_score: 0.0
+      focal_alpha_obj_score: -1.0
   optim:
     amp:
       enabled: false
       amp_dtype: bfloat16
-
     optimizer:
       _target_: torch.optim.AdamW
       weight_decay: 0.05
-
     gradient_clip:
       _target_: training.optimizer.GradientClipper
       max_norm: 0.1
       norm_type: 2
-
     options:
       lr:
         - scheduler:
@@ -410,14 +364,9 @@ trainer:
             start_value: ${scratch.vision_lr}
             end_value: ${divide:${scratch.vision_lr}, 10}
           param_names:
-            - "teacher.image_encoder.*"
-            - "student.image_encoder.*"
-        - scheduler:
-            _target_: fvcore.common.param_scheduler.CosineParamScheduler
-            start_value: ${scratch.bit_controller_lr}
-            end_value: ${divide:${scratch.bit_controller_lr}, 10}
-          param_names:
-            - "bit_controller.*"
+            - "model.image_encoder.*"
+            - "model.memory_attention.*"
+            - "model.memory_encoder.*"
       weight_decay:
         - scheduler:
             _target_: fvcore.common.param_scheduler.ConstantParamScheduler
@@ -428,22 +377,18 @@ trainer:
           param_names:
             - "*bias*"
           module_cls_names: ["torch.nn.LayerNorm"]
+  logging:
+    log_dir: ${paths.experiment_dir}/logs
+    log_freq: 10
+    tensorboard_writer:
+      _target_: training.utils.logger.make_tensorboard_logger
+      log_dir: ${paths.experiment_dir}/tensorboard
+      flush_secs: 120
+      should_log: true
   checkpoint:
     save_dir: ${paths.experiment_dir}/checkpoints
     save_freq: 1
     skip_saving_parameters: []
-  logging:
-    log_dir: ${paths.experiment_dir}/logs
-    log_freq: 50
-    tensorboard_writer: null
-    wandb:
-      project: adaptive_qat
-      mode: ${oc.env:WANDB_MODE, online}
-      name: adaptive_qat_toy
-      config:
-        experiment_dir: ${paths.experiment_dir}
-        sa_v_file_list: ${paths.sa_v_file_list}
-        sa1b_file_list: ${paths.sa1b_file_list}
 
 launcher:
   num_nodes: 1
@@ -451,6 +396,11 @@ launcher:
   experiment_log_dir: ${paths.experiment_dir}
 
 submitit:
+  partition: null
+  account: null
+  qos: null
+  cpus_per_task: 10
   use_cluster: false
-  timeout_hour: 4
-  cpus_per_task: 8
+  timeout_hour: 24
+  name: null
+  port_range: [10000, 65000]

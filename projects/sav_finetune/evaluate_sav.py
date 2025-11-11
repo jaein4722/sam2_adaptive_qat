@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import multiprocessing as mp
 from pathlib import Path
 import sys
 
@@ -65,6 +66,107 @@ def _summarize_metrics(
     return summary
 
 
+def _parse_devices(device: str, devices_csv: Optional[str]) -> List[str]:
+    if devices_csv:
+        devices = [d.strip() for d in devices_csv.split(",") if d.strip()]
+        if not devices:
+            raise ValueError("--devices must specify at least one device.")
+        return devices
+    return [device]
+
+
+def _shard_videos(video_names: Sequence[str], num_shards: int) -> List[List[str]]:
+    shards: List[List[str]] = [[] for _ in range(num_shards)]
+    for idx, name in enumerate(video_names):
+        shards[idx % num_shards].append(name)
+    return shards
+
+
+def _prediction_worker(
+    device: str,
+    model_cfg: str,
+    checkpoint: str,
+    video_root: str,
+    annotation_root: str,
+    output_root: str,
+    video_names: Sequence[str],
+    score_thresh: float,
+    use_all_masks: bool,
+    hydra_overrides_extra: Sequence[str],
+) -> None:
+    if not video_names:
+        return
+    torch_device = torch.device(device)
+    if torch_device.type == "cuda":
+        torch.cuda.set_device(torch_device)
+
+    predictor = build_sam2_video_predictor(
+        config_file=model_cfg,
+        ckpt_path=checkpoint,
+        device=device,
+        apply_postprocessing=True,
+        hydra_overrides_extra=list(hydra_overrides_extra),
+    )
+    torch.set_grad_enabled(False)
+    _run_prediction(
+        predictor,
+        Path(video_root),
+        Path(annotation_root),
+        Path(output_root),
+        video_names,
+        score_thresh=score_thresh,
+        use_all_masks=use_all_masks,
+    )
+
+
+def _run_prediction_multi_device(
+    devices: Sequence[str],
+    model_cfg: str,
+    checkpoint: str,
+    video_root: Path,
+    annotation_root: Path,
+    output_root: Path,
+    video_names: Sequence[str],
+    score_thresh: float,
+    use_all_masks: bool,
+    hydra_overrides_extra: Sequence[str],
+) -> None:
+    num_devices = len(devices)
+    video_shards = _shard_videos(video_names, num_devices)
+    ctx = mp.get_context("spawn")
+    processes = []
+    print(
+        f"Spawning {num_devices} inference workers across devices: {', '.join(devices)}"
+    )
+    for device, shard in zip(devices, video_shards):
+        if not shard:
+            continue
+        proc = ctx.Process(
+            target=_prediction_worker,
+            args=(
+                device,
+                model_cfg,
+                checkpoint,
+                str(video_root),
+                str(annotation_root),
+                str(output_root),
+                shard,
+                score_thresh,
+                use_all_masks,
+                list(hydra_overrides_extra),
+            ),
+        )
+        proc.start()
+        processes.append(proc)
+
+    for proc in processes:
+        proc.join()
+        if proc.exitcode != 0:
+            raise RuntimeError(
+                f"Inference worker exited with code {proc.exitcode}. Check logs above for details."
+            )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run SAM 2 inference on SA-V videos and compute evaluation metrics",
@@ -118,6 +220,12 @@ def main() -> None:
         help="Device used for inference",
     )
     parser.add_argument(
+        "--devices",
+        type=str,
+        default=None,
+        help="Comma-separated list of devices to use for parallel inference (e.g. cuda:0,cuda:1). Overrides --device.",
+    )
+    parser.add_argument(
         "--skip-inference",
         action="store_true",
         help="Only run evaluation using existing predictions in output_root",
@@ -143,26 +251,41 @@ def main() -> None:
 
     video_names = _discover_videos(video_root, video_list_file)
     print(f"Running on {len(video_names)} videos")
+    devices = _parse_devices(args.device, args.devices)
 
     if not args.skip_inference:
         hydra_overrides_extra = ["++model.non_overlap_masks=false"]
-        predictor = build_sam2_video_predictor(
-            config_file=args.model_cfg,
-            ckpt_path=args.checkpoint,
-            device=args.device,
-            apply_postprocessing=True,
-            hydra_overrides_extra=hydra_overrides_extra,
-        )
-        torch.set_grad_enabled(False)
-        _run_prediction(
-            predictor,
-            video_root,
-            annotation_root,
-            output_root,
-            video_names,
-            score_thresh=args.score_thresh,
-            use_all_masks=args.use_all_masks,
-        )
+        if len(devices) == 1:
+            predictor = build_sam2_video_predictor(
+                config_file=args.model_cfg,
+                ckpt_path=args.checkpoint,
+                device=devices[0],
+                apply_postprocessing=True,
+                hydra_overrides_extra=hydra_overrides_extra,
+            )
+            torch.set_grad_enabled(False)
+            _run_prediction(
+                predictor,
+                video_root,
+                annotation_root,
+                output_root,
+                video_names,
+                score_thresh=args.score_thresh,
+                use_all_masks=args.use_all_masks,
+            )
+        else:
+            _run_prediction_multi_device(
+                devices,
+                args.model_cfg,
+                args.checkpoint,
+                video_root,
+                annotation_root,
+                output_root,
+                video_names,
+                score_thresh=args.score_thresh,
+                use_all_masks=args.use_all_masks,
+                hydra_overrides_extra=hydra_overrides_extra,
+            )
     else:
         print("Skipping inference and using existing predictions")
 

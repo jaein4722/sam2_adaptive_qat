@@ -14,7 +14,7 @@ paths:
   sa1b_annotations: ${paths.data_root}/sa-1b_split/train
   sa1b_file_list: projects/adaptive_qat/configs/filelists/sa1b_train_1000.txt
   sa1b_excluded_list: null
-  importance_json: projects/adaptive_qat/configs/importance/hiera_base_plus_importance.json
+  importance_json: projects/adaptive_qat/configs/importance/hiera_base_plus_importance_v2.json
   experiment_dir: sam2_logs/adaptive_qat_example
   teacher_checkpoint: checkpoints/sam2.1_hiera_base_plus.pt
   student_checkpoint: checkpoints/sam2.1_hiera_base_plus.pt
@@ -29,8 +29,7 @@ scratch:
   num_epochs: 1
   base_lr: 5.0e-6
   vision_lr: 3.0e-6
-  bit_controller_lr: 7.0e-3
-
+  bit_controller_lr: 1.0e-2
 model_base: &sam2_model
   _target_: training.model.sam2.SAM2Train
   image_encoder:
@@ -205,7 +204,7 @@ trainer:
   mode: train
   accelerator: ${oc.env:ADAPTIVE_ACCELERATOR, cuda}
   seed_value: 123
-  mid_epoch_val_fractions: [0.25, 0.5, 0.75]
+  mid_epoch_val_fractions: []
   distributed:
     backend: ${oc.env:ADAPTIVE_DIST_BACKEND, nccl}
     find_unused_parameters: true
@@ -330,6 +329,7 @@ trainer:
         qdrop_p: 0.15
       checkpoint_modules:
         - "image_encoder.trunk"
+        - "sam_mask_decoder.output_upscaling"
         - "sam_mask_decoder.transformer"
       checkpoint_use_reentrant: false
     feature_layers: null

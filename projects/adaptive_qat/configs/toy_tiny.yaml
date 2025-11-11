@@ -1,0 +1,462 @@
+# Adaptive QAT training template.
+
+paths:
+  data_root: /home/lji/SAM/datasets
+  sa_v_frames: ${paths.data_root}/sa-v/sav_train/JPEGImages_24fps
+  sa_v_annotations: ${paths.data_root}/sa-v/sav_train/Annotations_manual_JSON
+  sa_v_file_list: projects/adaptive_qat/configs/filelists/sav_train_10.txt
+  sa_v_excluded_list: null
+  sa_v_val_frames: ${paths.data_root}/sa-v/sav_val/JPEGImages_24fps
+  sa_v_val_annotations: ${paths.data_root}/sa-v/sav_val/Annotations_6fps
+  sa_v_val_file_list: projects/adaptive_qat/configs/filelists/sav_val_10.txt
+  sa_v_val_excluded_list: null
+  sa1b_images: ${paths.data_root}/sa-1b_split/train
+  sa1b_annotations: ${paths.data_root}/sa-1b_split/train
+  sa1b_file_list: projects/adaptive_qat/configs/filelists/sa1b_train_1000.txt
+  sa1b_excluded_list: null
+  importance_json: projects/adaptive_qat/configs/importance/hiera_base_plus_importance_v2.json
+  experiment_dir: sam2_logs/adaptive_qat_example
+  teacher_checkpoint: checkpoints/sam2.1_hiera_tiny.pt
+  student_checkpoint: checkpoints/sam2.1_hiera_tiny.pt
+
+scratch:
+  resolution: 1024
+  train_batch_size: 1
+  num_train_workers: 8
+  num_frames: 4
+  max_num_objects: 3
+  phases_per_epoch: 1
+  num_epochs: 1
+  base_lr: 5.0e-6
+  vision_lr: 3.0e-6
+  bit_controller_lr: 1.0e-2
+model_base: &sam2_model
+  _target_: training.model.sam2.SAM2Train
+  image_encoder:
+    _target_: sam2.modeling.backbones.image_encoder.ImageEncoder
+    scalp: 1
+    trunk:
+      _target_: sam2.modeling.backbones.hieradet.Hiera
+      embed_dim: 96
+      num_heads: 1
+      stages: [1, 2, 7, 2]
+      global_att_blocks: [5, 7, 9]
+      window_pos_embed_bkg_spatial_size: [7, 7]
+    neck:
+      _target_: sam2.modeling.backbones.image_encoder.FpnNeck
+      position_encoding:
+        _target_: sam2.modeling.position_encoding.PositionEmbeddingSine
+        num_pos_feats: 256
+        normalize: true
+        scale: null
+        temperature: 10000
+      d_model: 256
+      backbone_channel_list: [768, 384, 192, 96]
+      fpn_top_down_levels: [2, 3]
+      fpn_interp_model: nearest
+  memory_attention:
+    _target_: sam2.modeling.memory_attention.MemoryAttention
+    d_model: 256
+    pos_enc_at_input: true
+    layer:
+      _target_: sam2.modeling.memory_attention.MemoryAttentionLayer
+      activation: relu
+      dim_feedforward: 2048
+      dropout: 0.1
+      pos_enc_at_attn: false
+      self_attention:
+        _target_: sam2.modeling.sam.transformer.RoPEAttention
+        rope_theta: 10000.0
+        feat_sizes: [64, 64]
+        embedding_dim: 256
+        num_heads: 1
+        downsample_rate: 1
+        dropout: 0.1
+      d_model: 256
+      pos_enc_at_cross_attn_keys: true
+      pos_enc_at_cross_attn_queries: false
+      cross_attention:
+        _target_: sam2.modeling.sam.transformer.RoPEAttention
+        rope_theta: 10000.0
+        feat_sizes: [64, 64]
+        rope_k_repeat: true
+        embedding_dim: 256
+        num_heads: 1
+        downsample_rate: 1
+        dropout: 0.1
+        kv_in_dim: 64
+    num_layers: 4
+  memory_encoder:
+    _target_: sam2.modeling.memory_encoder.MemoryEncoder
+    out_dim: 64
+    position_encoding:
+      _target_: sam2.modeling.position_encoding.PositionEmbeddingSine
+      num_pos_feats: 64
+      normalize: true
+      scale: null
+      temperature: 10000
+    mask_downsampler:
+      _target_: sam2.modeling.memory_encoder.MaskDownSampler
+      kernel_size: 3
+      stride: 2
+      padding: 1
+    fuser:
+      _target_: sam2.modeling.memory_encoder.Fuser
+      layer:
+        _target_: sam2.modeling.memory_encoder.CXBlock
+        dim: 256
+        kernel_size: 7
+        padding: 3
+        layer_scale_init_value: 1.0e-6
+        use_dwconv: true
+      num_layers: 2
+  num_maskmem: 7
+  image_size: ${scratch.resolution}
+  sigmoid_scale_for_mem_enc: 20.0
+  sigmoid_bias_for_mem_enc: -10.0
+  use_mask_input_as_output_without_sam: true
+  directly_add_no_mem_embed: true
+  no_obj_embed_spatial: true
+  use_high_res_features_in_sam: true
+  multimask_output_in_sam: true
+  iou_prediction_use_sigmoid: true
+  use_obj_ptrs_in_encoder: true
+  add_tpos_enc_to_obj_ptrs: true
+  proj_tpos_enc_in_obj_ptrs: true
+  use_signed_tpos_enc_to_obj_ptrs: true
+  only_obj_ptrs_in_the_past_for_eval: true
+  pred_obj_scores: true
+  pred_obj_scores_mlp: true
+  fixed_no_obj_ptr: true
+  multimask_output_for_tracking: true
+  use_multimask_token_for_obj_ptr: true
+  multimask_min_pt_num: 0
+  multimask_max_pt_num: 1
+  use_mlp_for_obj_ptr_proj: true
+  prob_to_use_pt_input_for_train: 0.5
+  prob_to_use_pt_input_for_eval: 0.0
+  prob_to_use_box_input_for_train: 0.5
+  prob_to_use_box_input_for_eval: 0.0
+  prob_to_sample_from_gt_for_train: 0.1
+  num_frames_to_correct_for_train: 2
+  num_frames_to_correct_for_eval: 1
+  rand_frames_to_correct_for_train: true
+  add_all_frames_to_correct_as_cond: true
+  num_init_cond_frames_for_train: 2
+  rand_init_cond_frames_for_train: true
+  num_correction_pt_per_frame: 7
+  use_act_ckpt_iterative_pt_sampling: false
+  num_init_cond_frames_for_eval: 1
+  forward_backbone_per_frame_for_eval: true
+  freeze_image_encoder: false
+
+vos:
+  train_transforms:
+    - _target_: training.dataset.transforms.ComposeAPI
+      transforms:
+        - _target_: training.dataset.transforms.RandomHorizontalFlip
+          consistent_transform: true
+        - _target_: training.dataset.transforms.RandomAffine
+          degrees: 20
+          shear: 15
+          image_interpolation: bilinear
+          consistent_transform: true
+        - _target_: training.dataset.transforms.RandomResizeAPI
+          sizes: ${scratch.resolution}
+          square: true
+          consistent_transform: true
+        - _target_: training.dataset.transforms.ColorJitter
+          consistent_transform: true
+          brightness: 0.1
+          contrast: 0.05
+          saturation: 0.05
+          hue: null
+        - _target_: training.dataset.transforms.ToTensorAPI
+        - _target_: training.dataset.transforms.NormalizeAPI
+          mean: [0.485, 0.456, 0.406]
+          std: [0.229, 0.224, 0.225]
+  val_transforms:
+    - _target_: training.dataset.transforms.ComposeAPI
+      transforms:
+        - _target_: training.dataset.transforms.RandomResizeAPI
+          sizes: ${scratch.resolution}
+          square: true
+          consistent_transform: true
+        - _target_: training.dataset.transforms.ToTensorAPI
+        - _target_: training.dataset.transforms.NormalizeAPI
+          mean: [0.485, 0.456, 0.406]
+          std: [0.229, 0.224, 0.225]
+
+dataset:
+  sa_v:
+    sample_rate: 1
+    rm_unannotated: true
+    ann_every: 4
+    frames_fps: 24
+    multiplier: 1
+  sa1b:
+    num_frames: ${scratch.num_frames}
+    mask_area_frac_thresh: 0.01
+    uncertain_iou: -1
+    multiplier: 1
+
+trainer:
+  _target_: projects.adaptive_qat.trainer.AdaptiveTrainer
+  max_epochs: ${scratch.num_epochs}
+  mode: train
+  accelerator: ${oc.env:ADAPTIVE_ACCELERATOR, cuda}
+  seed_value: 123
+  mid_epoch_val_fractions: []
+  distributed:
+    backend: ${oc.env:ADAPTIVE_DIST_BACKEND, nccl}
+    find_unused_parameters: true
+  cuda:
+    allow_tf32: true
+  data:
+    train:
+      _target_: training.dataset.sam2_datasets.TorchTrainMixedDataset
+      datasets:
+        - _target_: training.dataset.utils.RepeatFactorWrapper
+          seed: 0
+          dataset:
+            _target_: training.dataset.vos_dataset.VOSDataset
+            transforms: ${vos.train_transforms}
+            training: true
+            multiplier: ${dataset.sa_v.multiplier}
+            video_dataset:
+              _target_: training.dataset.vos_raw_dataset.JSONRawDataset
+              img_folder: ${paths.sa_v_frames}
+              gt_folder: ${paths.sa_v_annotations}
+              file_list_txt: ${paths.sa_v_file_list}
+              excluded_videos_list_txt: ${paths.sa_v_excluded_list}
+              sample_rate: ${dataset.sa_v.sample_rate}
+              rm_unannotated: ${dataset.sa_v.rm_unannotated}
+              ann_every: ${dataset.sa_v.ann_every}
+              frames_fps: ${dataset.sa_v.frames_fps}
+            sampler:
+              _target_: training.dataset.vos_sampler.RandomUniformSampler
+              num_frames: ${scratch.num_frames}
+              max_num_objects: ${scratch.max_num_objects}
+              reverse_time_prob: 0.1
+        - _target_: training.dataset.utils.RepeatFactorWrapper
+          seed: 1
+          dataset:
+            _target_: training.dataset.vos_dataset.VOSDataset
+            transforms: ${vos.train_transforms}
+            training: true
+            multiplier: ${dataset.sa1b.multiplier}
+            video_dataset:
+              _target_: training.dataset.vos_raw_dataset.SA1BRawDataset
+              img_folder: ${paths.sa1b_images}
+              gt_folder: ${paths.sa1b_annotations}
+              file_list_txt: ${paths.sa1b_file_list}
+              excluded_videos_list_txt: ${paths.sa1b_excluded_list}
+              num_frames: ${dataset.sa1b.num_frames}
+              mask_area_frac_thresh: ${dataset.sa1b.mask_area_frac_thresh}
+              uncertain_iou: ${dataset.sa1b.uncertain_iou}
+            sampler:
+              _target_: training.dataset.vos_sampler.RandomUniformSampler
+              num_frames: ${scratch.num_frames}
+              max_num_objects: ${scratch.max_num_objects}
+              reverse_time_prob: 0.0
+      batch_sizes:
+        - ${scratch.train_batch_size}
+        - ${scratch.train_batch_size}
+      num_workers: ${scratch.num_train_workers}
+      shuffle: true
+      pin_memory: true
+      drop_last: true
+      collate_fn:
+        _target_: training.utils.data_utils.collate_fn
+        _partial_: true
+        dict_key: all
+      phases_per_epoch: ${scratch.phases_per_epoch}
+      dataset_prob:
+        - 0.5
+        - 0.5
+    val:
+      _target_: training.dataset.sam2_datasets.TorchTrainMixedDataset
+      datasets:
+        - _target_: training.dataset.vos_dataset.VOSDataset
+          transforms: ${vos.val_transforms}
+          training: false
+          multiplier: 1
+          video_dataset:
+            _target_: training.dataset.vos_raw_dataset.PNGRawDataset
+            img_folder: ${paths.sa_v_val_frames}
+            gt_folder: ${paths.sa_v_val_annotations}
+            file_list_txt: ${paths.sa_v_val_file_list}
+            excluded_videos_list_txt: ${paths.sa_v_val_excluded_list}
+            is_palette: false
+          sampler:
+            _target_: training.dataset.vos_sampler.EvalSampler
+            max_frames: ${scratch.num_frames}
+            frame_stride: 1
+      batch_sizes:
+        - 1
+      num_workers: 2
+      shuffle: false
+      pin_memory: true
+      drop_last: false
+      collate_fn:
+        _target_: training.utils.data_utils.collate_fn
+        _partial_: true
+        dict_key: val
+      phases_per_epoch: 1
+      dataset_prob:
+        - 1.0
+  model:
+    _target_: projects.adaptive_qat.models.system.AdaptiveQATModel
+    teacher: *sam2_model
+    student: *sam2_model
+    teacher_checkpoint: ${paths.teacher_checkpoint}
+    student_checkpoint: ${paths.student_checkpoint}
+    quantization:
+      _target_: projects.adaptive_qat.models.system.AdaptiveQATQuantConfig
+      layers: null
+      init_bits: 6.0
+      min_bits: 2.0
+      max_bits: 8.0
+      requires_grad: true
+      importance: null
+      importance_path: ${paths.importance_json}
+      smoothing: 0.3
+      allow_bit_grad: true
+      smoothing_end_ratio: 0.2
+      smoothing_importance_scale: true
+      act:
+        ema_scale: true
+        ema_decay: 0.95
+        pact: true
+        qdrop_p: 0.15
+      checkpoint_modules:
+        - "image_encoder.trunk"
+        - "sam_mask_decoder.output_upscaling"
+        - "sam_mask_decoder.transformer"
+      checkpoint_use_reentrant: false
+    feature_layers: null
+  loss:
+    all:
+      _target_: projects.adaptive_qat.losses.AdaptiveQATLoss
+      base_loss:
+        _target_: training.loss_fns.MultiStepMultiMasksAndIous
+        weight_dict:
+          loss_mask: 20
+          loss_dice: 1
+          loss_iou: 1
+          loss_class: 1
+        supervise_all_iou: true
+        iou_use_l1_loss: true
+        pred_obj_scores: true
+        focal_gamma_obj_score: 0.0
+        focal_alpha_obj_score: -1.0
+      layer_names: null
+      importance_path: ${paths.importance_json}
+      kd_temperature: 1.0
+      base_weight: 1.0
+      layer_kd_weight: 1.0
+      bit_penalty_weight: 3.0
+      output_kd_weight: 1.0
+      alpha: 1.8
+      eps: 1.0e-3
+      budget:
+        enabled: true
+        target_avg_w_bits: 3.0
+        warm_target: 3.3
+        mu_init: 0.0
+        mu_step: 5.0e-3
+        warmup_ratio: 0.2
+    val:
+      _target_: projects.adaptive_qat.losses.AdaptiveQATLoss
+      base_loss:
+        _target_: training.loss_fns.MultiStepMultiMasksAndIous
+        weight_dict:
+          loss_mask: 20
+          loss_dice: 1
+          loss_iou: 1
+          loss_class: 1
+        supervise_all_iou: true
+        iou_use_l1_loss: true
+        pred_obj_scores: true
+        focal_gamma_obj_score: 0.0
+        focal_alpha_obj_score: -1.0
+      layer_names: null
+      importance_path: ${paths.importance_json}
+      kd_temperature: 1.0
+      base_weight: 1.0
+      layer_kd_weight: 1.0
+      bit_penalty_weight: 3.0
+      output_kd_weight: 1.0
+      alpha: 1.8
+      eps: 1.0e-3
+      budget:
+        enabled: false
+  optim:
+    amp:
+      enabled: false
+      amp_dtype: bfloat16
+
+    optimizer:
+      _target_: torch.optim.AdamW
+      weight_decay: 0.05
+
+    gradient_clip:
+      _target_: training.optimizer.GradientClipper
+      max_norm: 0.1
+      norm_type: 2
+
+    options:
+      lr:
+        - scheduler:
+            _target_: fvcore.common.param_scheduler.CosineParamScheduler
+            start_value: ${scratch.base_lr}
+            end_value: ${divide:${scratch.base_lr}, 10}
+        - scheduler:
+            _target_: fvcore.common.param_scheduler.CosineParamScheduler
+            start_value: ${scratch.vision_lr}
+            end_value: ${divide:${scratch.vision_lr}, 10}
+          param_names:
+            - "teacher.image_encoder.*"
+            - "student.image_encoder.*"
+        - scheduler:
+            _target_: fvcore.common.param_scheduler.CosineParamScheduler
+            start_value: ${scratch.bit_controller_lr}
+            end_value: ${divide:${scratch.bit_controller_lr}, 10}
+          param_names:
+            - "bit_controller.*"
+      weight_decay:
+        - scheduler:
+            _target_: fvcore.common.param_scheduler.ConstantParamScheduler
+            value: 0.05
+        - scheduler:
+            _target_: fvcore.common.param_scheduler.ConstantParamScheduler
+            value: 0.0
+          param_names:
+            - "*bias*"
+          module_cls_names: ["torch.nn.LayerNorm"]
+  checkpoint:
+    save_dir: ${paths.experiment_dir}/checkpoints
+    save_freq: 1
+    skip_saving_parameters: []
+  logging:
+    log_dir: ${paths.experiment_dir}/logs
+    log_freq: 50
+    tensorboard_writer: null
+    wandb:
+      project: adaptive_qat
+      mode: ${oc.env:WANDB_MODE, online}
+      name: adaptive_qat_toy
+      config:
+        experiment_dir: ${paths.experiment_dir}
+        sa_v_file_list: ${paths.sa_v_file_list}
+        sa1b_file_list: ${paths.sa1b_file_list}
+
+launcher:
+  num_nodes: 1
+  gpus_per_node: 1
+  experiment_log_dir: ${paths.experiment_dir}
+
+submitit:
+  use_cluster: false
+  timeout_hour: 4
+  cpus_per_task: 8

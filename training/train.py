@@ -25,7 +25,7 @@ from training.utils.train_utils import makedir, register_omegaconf_resolvers
 os.environ["HYDRA_FULL_ERROR"] = "1"
 
 # debug
-torch.autograd.set_detect_anomaly(True)
+# torch.autograd.set_detect_anomaly(True)
 
 def single_proc_run(local_rank, main_port, cfg, world_size):
     """Single GPU process"""

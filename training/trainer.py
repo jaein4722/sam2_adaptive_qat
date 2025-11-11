@@ -788,7 +788,10 @@ class Trainer:
 
                 if self.gradient_logger is not None:
                     self.gradient_logger(
-                        self.model, rank=self.distributed_rank, where=self.where
+                        self.model,
+                        self.steps[phase],
+                        self.distributed_rank,
+                        self.where,
                     )
 
                 # Optimizer step: the scaler will make sure gradients are not

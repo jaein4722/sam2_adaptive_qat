@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Dict, Iterable, Mapping, Optional, Union
 
@@ -38,6 +39,12 @@ def checkpoint_wrapper(module: nn.Module, *, use_reentrant: bool = False) -> nn.
             super().__init__()
             self.wrapped = wrapped
 
+        def __getattr__(self, name):
+            try:
+                return super().__getattr__(name)
+            except AttributeError:
+                return getattr(self.wrapped, name)
+
         def forward(self, *inputs, **kwargs):
             def _forward(*inner_inputs):
                 return self.wrapped(*inner_inputs, **kwargs)
@@ -50,6 +57,21 @@ def checkpoint_wrapper(module: nn.Module, *, use_reentrant: bool = False) -> nn.
                 )
             except TypeError:
                 return torch_checkpoint.checkpoint(_forward, *inputs)
+
+        def __len__(self):
+            if hasattr(self.wrapped, "__len__"):
+                return len(self.wrapped)  # type: ignore[arg-type]
+            raise TypeError(f"Object of type {type(self.wrapped).__name__} has no len()")
+
+        def __iter__(self):
+            if hasattr(self.wrapped, "__iter__"):
+                return iter(self.wrapped)
+            raise TypeError(f"Object of type {type(self.wrapped).__name__} is not iterable")
+
+        def __getitem__(self, idx):
+            if hasattr(self.wrapped, "__getitem__"):
+                return self.wrapped[idx]
+            raise TypeError(f"Object of type {type(self.wrapped).__name__} does not support indexing")
 
     return _CheckpointModule(module)
 
@@ -97,7 +119,7 @@ def _filter_module_names(model: nn.Module, names: Iterable[str]) -> Dict[str, nn
     for name in names:
         try:
             module = resolve_module(model, name)
-        except AttributeError:
+        except (AttributeError, IndexError, KeyError):
             continue
         resolved[name] = module
     return resolved
@@ -224,6 +246,7 @@ class AdaptiveQATModel(nn.Module):
                 checkpoint_modules,
                 use_reentrant=quantization.checkpoint_use_reentrant,
             )
+        self._checkpoint_wrapped_modules = tuple(checkpoint_modules)
 
         self.teacher = teacher_module
         self.student = student_module
@@ -240,6 +263,23 @@ class AdaptiveQATModel(nn.Module):
         )
         self.student_features = FeatureCatcher(student_modules)
         self.teacher_features = FeatureCatcher(teacher_modules)
+
+    def sanitize_student_state_dict(self, state_dict: Mapping[str, torch.Tensor]):
+        if not self._checkpoint_wrapped_modules:
+            return state_dict
+        sanitized = OrderedDict()
+        for key, value in state_dict.items():
+            new_key = key
+            for module_name in self._checkpoint_wrapped_modules:
+                for token in ("module", "wrapped"):
+                    needle = f"{module_name}.{token}."
+                    if needle in new_key:
+                        new_key = new_key.replace(needle, f"{module_name}.")
+                    suffix = f"{module_name}.{token}"
+                    if new_key.endswith(suffix):
+                        new_key = new_key[: -len(suffix)] + module_name
+            sanitized[new_key] = value
+        return sanitized
 
     def forward(self, batch):  # type: ignore[override]
         self.teacher_features.clear()
